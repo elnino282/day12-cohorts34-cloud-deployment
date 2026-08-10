@@ -9,6 +9,13 @@ Tất cả config đọc từ environment variables.
 import os
 import logging
 from dataclasses import dataclass, field
+from pathlib import Path
+
+from dotenv import load_dotenv
+
+
+# Nạp file cạnh config.py để lệnh chạy vẫn đúng dù gọi từ thư mục repository.
+load_dotenv(Path(__file__).with_name(".env"))
 
 
 @dataclass

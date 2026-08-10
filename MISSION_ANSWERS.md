@@ -161,3 +161,70 @@ POST http://localhost/ask    -> 200 {"answer":"Agent đang hoạt động tốt!
 ```
 
 Sau kiểm thử, stack được dừng bằng `docker compose down --volumes`; containers, private network và hai test volumes đã được xóa.
+
+## Part 3: Cloud Deployment
+
+### Exercise 3.1: Railway deployment
+
+- **Platform:** Railway
+- **Public URL:** <https://day12-cohorts34-cloud-deployment-production-7ff4.up.railway.app/>
+- **Root directory:** `03-cloud-deployment/railway`
+- **Builder:** Nixpacks
+- **Start command:** `uvicorn app:app --host 0.0.0.0 --port $PORT`
+- **Health check:** `/health`, timeout 30 seconds
+- **Restart policy:** `ON_FAILURE`, tối đa 3 lần thử lại
+
+Railway cấp biến `PORT` lúc chạy; ứng dụng không hardcode port và lắng nghe trên `0.0.0.0`, vì vậy proxy của platform có thể chuyển traffic public vào process Uvicorn. Dịch vụ dùng mock LLM nên không cần API key thật.
+
+Kiểm thử trực tiếp public URL ngày 2026-08-10:
+
+```text
+GET / -> HTTP 200
+{"message":"AI Agent running on Railway!","docs":"/docs","health":"/health"}
+
+GET /health -> HTTP 200
+{"status":"ok","uptime_seconds":2986.5,"platform":"Railway",
+ "timestamp":"2026-08-10T05:37:23.546000+00:00"}
+
+POST /ask {"question":"What is cloud deployment?"} -> HTTP 200
+{"question":"What is cloud deployment?",
+ "answer":"Deployment là quá trình đưa code từ máy bạn lên server để người khác dùng được.",
+ "platform":"Railway"}
+```
+
+Các kết quả trên chứng minh domain public hoạt động, health check trả trạng thái hợp lệ và endpoint agent xử lý được request thực tế.
+
+### Exercise 3.2: Railway and Render comparison
+
+| Aspect | `railway.toml` | `render.yaml` |
+|---|---|---|
+| Phạm vi | Cấu hình một Railway service | Blueprint khai báo nhiều resource |
+| Runtime/build | Nixpacks tự nhận diện Python | Khai báo `runtime: python` và `buildCommand` |
+| Start | `startCommand` | `startCommand` |
+| Health check | Path, timeout và restart policy | `healthCheckPath` |
+| Environment | Đặt qua dashboard/CLI | Khai báo `envVars`; secret dùng `sync: false` hoặc tự sinh |
+| Hạ tầng phụ trợ | Không khai báo trong file này | Khai báo thêm Redis và memory policy |
+| Region/plan | Không cố định trong file | Khai báo `region` và `plan` |
+| Auto deploy | Do Railway service/repository settings | `autoDeploy: true` trong Blueprint |
+
+Railway phù hợp cho bài lab và prototype vì cấu hình ngắn, deploy nhanh. Render Blueprint mô tả nhiều thành phần hơn trong một file, nên thuận tiện khi cần tái tạo cả web service và Redis. Secret không được commit vào Git ở cả hai cách; giá trị thật phải đặt qua dashboard hoặc secret manager của platform.
+
+### Exercise 3.3: GCP Cloud Run CI/CD analysis
+
+`cloudbuild.yaml` mô tả pipeline có thứ tự phụ thuộc rõ ràng:
+
+```text
+Git push/Cloud Build trigger
+          |
+          v
+test -> build image -> push image -> deploy Cloud Run
+          |               |
+          +---- tagged with COMMIT_SHA and latest
+```
+
+1. **Test:** dùng Python 3.11, cài dependencies và chạy `pytest`.
+2. **Build:** tạo Docker image có tag bất biến `$COMMIT_SHA` và tag `latest`, đồng thời tận dụng layer cache.
+3. **Push:** đẩy toàn bộ tags lên container registry.
+4. **Deploy:** Cloud Run triển khai đúng image theo commit, đặt region, resource limits, timeout và giới hạn 1–10 instances.
+
+`service.yaml` bổ sung cấu hình Infrastructure as Code: public ingress, concurrency 80, CPU/memory limits, environment variables, secrets lấy từ Secret Manager, cùng startup/liveness probes. `minScale: 1` giảm cold start nhưng phát sinh chi phí instance nhàn rỗi; `maxScale: 10` giới hạn tải và chi phí. So với Railway, Cloud Run phù hợp hơn khi cần image-based deployment, autoscaling chi tiết, IAM/Secret Manager và CI/CD có khả năng truy vết theo commit.

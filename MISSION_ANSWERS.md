@@ -68,3 +68,96 @@ POST /ask     -> 200 {"question":"Hello production", ... ,"model":"mock-llm"}
 ```
 
 Điều này minh họa các nguyên tắc 12-Factor chính: config nằm trong environment, service tự port-bind, log là event stream, và process có lifecycle rõ ràng để dễ thay thế khi deploy.
+
+## Part 2: Docker
+
+### Exercise 2.1: Basic Dockerfile questions
+
+1. **Base image là gì?** `python:3.11`. Đây là image Python đầy đủ dựa trên Linux, cung cấp OS userspace, Python interpreter, `pip` và các thư viện runtime. Bản production dùng `python:3.11-slim` để giảm thành phần không cần thiết.
+2. **Working directory là gì?** `WORKDIR /app` tạo/chọn `/app` làm thư mục mặc định cho các lệnh `COPY`, `RUN` và `CMD` theo sau, đồng thời là current directory khi container khởi động.
+3. **Tại sao copy `requirements.txt` trước source code?** Docker cache theo từng layer. Dependencies chỉ được cài lại khi `requirements.txt` đổi; sửa `app.py` không làm mất cache của layer `pip install`, nên rebuild nhanh hơn.
+4. **`CMD` và `ENTRYPOINT` khác nhau thế nào?** `ENTRYPOINT` xác định executable chính và khó bị thay thế vô tình; `CMD` cung cấp command hoặc arguments mặc định và có thể override trực tiếp ở cuối `docker run`. Khi dùng cả hai ở exec form, `CMD` thường là arguments mặc định truyền cho `ENTRYPOINT`.
+
+Dockerfile còn dùng `EXPOSE 8000` để mô tả port ứng dụng lắng nghe. `EXPOSE` không tự publish port; cần `docker run -p HOST_PORT:8000`.
+
+### Exercise 2.2: Build and run the basic container
+
+Build từ repository root vì các lệnh `COPY` dùng đường dẫn bắt đầu bằng `02-docker/` và `utils/`:
+
+```bash
+docker build -f 02-docker/develop/Dockerfile -t my-agent:develop .
+docker run --rm -p 8000:8000 my-agent:develop
+```
+
+Test:
+
+```bash
+curl -X POST http://localhost:8000/ask \
+  -H "Content-Type: application/json" \
+  -d '{"question":"What is Docker?"}'
+curl http://localhost:8000/health
+```
+
+Kết quả thực tế (máy kiểm thử dùng `18000:8000` do host port 8000 đang bận):
+
+```text
+Image size: 424,604,361 bytes = 424.6 MB = 404.9 MiB
+POST /ask   -> 200 {"answer":"Container là cách đóng gói app để chạy ở mọi nơi. Build once, run anywhere!"}
+GET /health -> 200 {"status":"ok","uptime_seconds":0.2,"container":true}
+```
+
+### Exercise 2.3: Multi-stage build and image comparison
+
+**Stage 1 — `builder`:** bắt đầu từ `python:3.11-slim`, cài `gcc` và `libpq-dev` phục vụ compile, rồi cài Python dependencies vào `/root/.local`. Stage này chỉ tạo build artifacts, không phải image được deploy.
+
+**Stage 2 — `runtime`:** bắt đầu lại từ một image slim sạch, tạo user `appuser`, chỉ copy dependencies đã cài cùng source cần chạy, thiết lập healthcheck và chạy hai Uvicorn workers. Compiler, APT metadata và các build packages không được đưa vào image cuối.
+
+Kết quả build và kiểm thử thực tế:
+
+| Image | Bytes | MiB | Runtime user |
+|---|---:|---:|---|
+| `my-agent:develop` | 424,604,361 | 404.9 | `root` mặc định |
+| `my-agent:advanced` | 56,819,592 | 54.2 | `appuser` (UID 999) |
+
+```text
+Reduction = (424,604,361 - 56,819,592) / 424,604,361 × 100 = 86.6%
+Docker health: healthy
+GET /health: 200
+POST /ask: 200
+```
+
+Image nhỏ hơn giúp pull/start nhanh, giảm storage và attack surface. Multi-stage còn tách build tools khỏi runtime, trong khi non-root user giảm tác động nếu ứng dụng bị khai thác.
+
+### Exercise 2.4: Docker Compose architecture and stack test
+
+```text
+                              internal bridge network
+Client ──HTTP :80──> Nginx ──agent:8000──> FastAPI Agent
+                                                │
+                      ┌─────────────────────────┴──────────────────────┐
+                      │                                                │
+              redis:6379                                      qdrant:6333
+          session/rate-limit cache                         vector database
+          volume: redis_data                              volume: qdrant_data
+```
+
+Compose khởi động bốn service:
+
+- **Nginx** là service duy nhất publish host port 80; nó reverse proxy đến `agent:8000` và áp dụng rate limiting.
+- **Agent** không publish trực tiếp ra host. Nó nhận `REDIS_URL=redis://redis:6379/0` và `QDRANT_URL=http://qdrant:6333`.
+- **Redis** cung cấp cache nội bộ và lưu dữ liệu trong named volume `redis_data`.
+- **Qdrant** cung cấp vector database nội bộ và lưu dữ liệu trong `qdrant_data`.
+
+Tên `agent`, `redis` và `qdrant` được Docker DNS phân giải trên private network `internal`. `depends_on` đợi Redis và Qdrant healthy trước khi start agent; Nginx chỉ chuyển traffic đến agent trong mạng này.
+
+Kiểm thử stack với project riêng `day12-part2-test`:
+
+```text
+agent:  healthy                 redis: healthy, PING -> PONG
+qdrant: healthy                 nginx: running
+agent resolved redis and qdrant through Docker DNS
+GET  http://localhost/health -> 200 {"status":"ok", ...}
+POST http://localhost/ask    -> 200 {"answer":"Agent đang hoạt động tốt! ..."}
+```
+
+Sau kiểm thử, stack được dừng bằng `docker compose down --volumes`; containers, private network và hai test volumes đã được xóa.

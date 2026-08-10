@@ -2,7 +2,7 @@
 # Docker Compose — Full Agent Stack
 #
 # Services:
-#   1. agent    — FastAPI AI agent (2 replicas)
+#   1. agent    — FastAPI AI agent (2 Uvicorn worker processes)
 #   2. redis    — Cache cho session và rate limiting
 #   3. qdrant   — Vector database cho RAG
 #   4. nginx    — Reverse proxy, load balancer
@@ -11,8 +11,6 @@
 # Test:  curl http://localhost/health
 # Stop:  docker compose down
 # ============================================================
-
-version: "3.9"
 
 services:
 
@@ -23,7 +21,7 @@ services:
     build:
       context: ../..             # build từ project root (Dockerfile dùng path từ root)
       dockerfile: 02-docker/production/Dockerfile
-      target: runtime          # chỉ build stage "runtime", không build "builder"
+      target: runtime          # image cuối là runtime; builder vẫn chạy để tạo dependencies
     environment:
       - ENVIRONMENT=staging
       - PORT=8000
@@ -32,7 +30,8 @@ services:
       # ❌ KHÔNG đặt secrets trực tiếp ở đây trong production
       # ✅ Dùng: docker secret hoặc env file ngoài git
     env_file:
-      - .env.local              # secrets riêng, trong .gitignore
+      - path: .env.local        # secrets riêng, trong .gitignore
+        required: false         # checkout sạch vẫn chạy được với mock LLM
     depends_on:
       redis:
         condition: service_healthy
@@ -90,7 +89,7 @@ services:
     image: nginx:alpine
     ports:
       - "80:80"      # HTTP
-      - "443:443"    # HTTPS (cần cert)
+      # Chỉ publish 443 sau khi cấu hình TLS certificate trong Nginx.
     volumes:
       - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
     depends_on:
